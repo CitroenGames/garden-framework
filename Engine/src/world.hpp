@@ -27,7 +27,7 @@ struct RetirementFence;
 
 enum class LifecycleStatus {
     Completed, CompletedWithObserverFailure, Queued, AlreadyPending, Alive, Pending,
-    Invalid, WrongWorld, Stale, QueryActive, Reentrant, AllocationFailure,
+    Invalid, WrongWorld, WrongThread, Stale, QueryActive, Reentrant, AllocationFailure,
     ObserverFailure, Partial, InternalFailure, Conflict, UnknownOperation
 };
 enum class LifecyclePhase { None, Prepare, Constraints, Event, Hierarchy, Physics, Components, Identity };
@@ -69,6 +69,33 @@ struct LifecycleFaultHook {
 struct LifecycleTestAccess;
 }
 
+class ConstructionHandle {
+public:
+    bool valid() const noexcept { return owner_ && incarnation_ && serial_; }
+    friend bool operator==(const ConstructionHandle&, const ConstructionHandle&) noexcept = default;
+private:
+    friend class world;
+    const world* owner_ = nullptr;
+    uint64_t incarnation_ = 0, serial_ = 0;
+};
+class StagedEntity {
+public:
+    bool valid() const noexcept { return transaction_.valid() && member_serial_; }
+    friend bool operator==(const StagedEntity&, const StagedEntity&) noexcept = default;
+private:
+    friend class world;
+    ConstructionHandle transaction_{};
+    uint64_t member_serial_ = 0;
+};
+enum class ConstructionStatus { Completed, InvalidInput, StaleTransaction, WrongWorld, Conflict, WrongThread, QueryActive, Reentrant, AllocationFailure, ComponentFailure, EventQueueFailure, TransactionFailed };
+struct ConstructionBeginResult { ConstructionStatus status; ConstructionHandle transaction{}; };
+struct StagedEntityResult { ConstructionStatus status; StagedEntity entity{}; EntityRef reference{}; garden::ecs::EntityHandle captured{}; };
+struct ConstructionCommitResult { ConstructionStatus status; std::vector<garden::ecs::EntityHandle> entities; std::span<const garden::ecs::EntityHandle> captured; };
+enum class StagedLookupStatus { Found, NotFound, InvalidInput, StaleTransaction, WrongWorld, WrongThread, QueryActive, Reentrant, TransactionFailed, Conflict };
+struct StagedLookupResult { StagedLookupStatus status; StagedEntity entity{}; };
+struct ConstructionAbortResult { ConstructionStatus status; LifecycleResult rollback{}; std::span<const garden::ecs::EntityHandle> captured; };
+struct ConstructionComponentResult { ConstructionStatus transaction_status; garden::ecs::ComponentStoreResult component_status; };
+
 enum class ScopedRestoreStatus { Completed, InvalidInput, Conflict, QueryActive, AllocationFailure, ConstructionFailure };
 struct ScopedRestoreResult {
     ScopedRestoreStatus status = ScopedRestoreStatus::Completed;
@@ -97,19 +124,34 @@ private:
     friend class CharacterPhysicsService;
     friend class LevelManager;
     friend struct garden::ecs::testing::LifecycleTestAccess;
+    struct ConstructionState;
+    std::unique_ptr<ConstructionState> construction_state;
+    ConstructionStatus validateConstruction(ConstructionHandle, bool allow_failed = false) const noexcept;
+    ConstructionStatus stagedKey(ConstructionHandle, StagedEntity, garden::ecs::ComponentEntityKey&) const noexcept;
+    entt::entity constructionEntity(ConstructionHandle, StagedEntity) const noexcept;
+    void failConstruction(ConstructionHandle) noexcept;
+    void constructionTransition(bool) noexcept;
+    bool constructionReentrant() const noexcept;
+    bool constructionActive() const noexcept;
+    class ConstructionAuthoringScope {
+    public:
+        ConstructionAuthoringScope(world&, ConstructionHandle) noexcept;
+        ~ConstructionAuthoringScope();
+        ConstructionStatus status() const noexcept { return status_; }
+        ConstructionAuthoringScope(const ConstructionAuthoringScope&) = delete;
+        ConstructionAuthoringScope& operator=(const ConstructionAuthoringScope&) = delete;
+    private:
+        world* owner_ = nullptr;
+        ConstructionStatus status_ = ConstructionStatus::InvalidInput;
+    };
+    bool isStaged(entt::entity) const noexcept;
+    bool stagedInvariant(ConstructionHandle, StagedEntity) const noexcept;
+    StagedEntityResult stageEntity(ConstructionHandle, EntityRef, std::string_view, bool);
     struct LifecycleState;
     std::unique_ptr<LifecycleState> lifecycle_state;
     uint64_t incarnation = 0;
     uint64_t next_operation_serial = 1;
     std::unique_ptr<RetirementFence> retirement_fence;
-    struct ConstructionTransaction {
-        world* owner;
-        std::vector<garden::ecs::EntityHandle> entities;
-        bool committed = false;
-        LifecycleOperationHandle rollback_operation{};
-    };
-    LifecycleResult abortUnpublished(ConstructionTransaction&) noexcept;
-    ScopedRestoreResult restoreScopedEntities(std::span<const EntityRef>, ConstructionTransaction&);
     LifecycleResult operationConflict() const noexcept;
     LifecycleResult operationProgress(LifecycleResult) noexcept;
     LifecycleStatus validateLifecycleHandle(garden::ecs::EntityHandle) const noexcept;
@@ -190,6 +232,64 @@ public:
 
     ~world();
 
+    ConstructionBeginResult beginConstruction() noexcept;
+    StagedEntityResult createStagedEntity(ConstructionHandle, std::string_view tag = {});
+    StagedEntityResult restoreStagedEntity(ConstructionHandle, EntityRef, std::string_view tag = {});
+    StagedLookupResult resolveStagedReference(ConstructionHandle, EntityRef) const noexcept;
+    ConstructionCommitResult commitConstruction(ConstructionHandle);
+    ConstructionAbortResult abortConstruction(ConstructionHandle) noexcept;
+    ConstructionStatus constructionStatus(ConstructionHandle) const noexcept;
+
+    template<class T, class... Args>
+    ConstructionComponentResult add(ConstructionHandle tx, StagedEntity entity, Args&&... args) {
+        using namespace garden::ecs;
+        ComponentEntityKey key{}; auto status = stagedKey(tx, entity, key);
+        if (status != ConstructionStatus::Completed) return {status, ComponentStoreResult::InvalidEntity};
+        ComponentId id{}; auto result = resolveType<T>(id);
+        if (result != ComponentStoreResult::Success) return {ConstructionStatus::Completed, result};
+        constructionTransition(true);
+        if (isAdapted(id)) {
+            auto arguments = std::forward_as_tuple(std::forward<Args>(args)...);
+            auto construct = [](void* destination, void* context) noexcept -> bool {
+                try { auto& tuple = *static_cast<decltype(arguments)*>(context);
+                    std::apply([destination](auto&&... v) { ::new (destination) T(std::forward<decltype(v)>(v)...); }, std::move(tuple)); return true;
+                } catch (...) { return false; }
+            };
+            result = addAdapted(id, key, construct, &arguments);
+        } else result = componentStore().add<T>(id, key, std::forward<Args>(args)...);
+        constructionTransition(false);
+        if (result != ComponentStoreResult::Success && result != ComponentStoreResult::Duplicate) failConstruction(tx);
+        if (!stagedInvariant(tx, entity)) { failConstruction(tx); return {ConstructionStatus::TransactionFailed, result}; }
+        return {constructionStatus(tx), result};
+    }
+    template<class T> ConstructionComponentResult get(ConstructionHandle tx, StagedEntity entity, T*& out) {
+        out = nullptr;
+        using namespace garden::ecs; ComponentEntityKey key{}; auto status = stagedKey(tx, entity, key);
+        if (status != ConstructionStatus::Completed) return {status, ComponentStoreResult::InvalidEntity};
+        ComponentId id{}; auto result = resolveType<T>(id); if (result != ComponentStoreResult::Success) return {status, result};
+        void* value = nullptr; result = getValue(id, key, value); if (result == ComponentStoreResult::Success) out = static_cast<T*>(value);
+        return {status, result};
+    }
+    template<class T> ConstructionComponentResult has(ConstructionHandle tx, StagedEntity entity, bool& out) const {
+        out = false;
+        using namespace garden::ecs; ComponentEntityKey key{}; auto status = stagedKey(tx, entity, key);
+        if (status != ConstructionStatus::Completed) return {status, ComponentStoreResult::InvalidEntity};
+        ComponentId id{}; auto result = resolveType<T>(id); if (result != ComponentStoreResult::Success) return {status, result};
+        void* value = nullptr; result = getValue(id, key, value);
+        if (result == ComponentStoreResult::NotFound) { out = false; result = ComponentStoreResult::Success; }
+        else if (result == ComponentStoreResult::Success) out = true;
+        return {status, result};
+    }
+    template<class T> ConstructionComponentResult remove(ConstructionHandle tx, StagedEntity entity) {
+        using namespace garden::ecs; ComponentEntityKey key{}; auto status = stagedKey(tx, entity, key);
+        if (status != ConstructionStatus::Completed) return {status, ComponentStoreResult::InvalidEntity};
+        ComponentId id{}; auto result = resolveType<T>(id); if (result != ComponentStoreResult::Success) return {status, result};
+        constructionTransition(true); result = removeValue(id, key); constructionTransition(false);
+        if (result != ComponentStoreResult::Success && result != ComponentStoreResult::NotFound) failConstruction(tx);
+        if (!stagedInvariant(tx, entity)) { failConstruction(tx); return {ConstructionStatus::TransactionFailed, result}; }
+        return {constructionStatus(tx), result};
+    }
+
     // Creates a Garden entity handle with a stable identity. Gameplay code uses
     // this handle instead of storage-library entity values.
     EntityCreationResult createEntity(std::string_view tag = {});
@@ -218,6 +318,7 @@ public:
     garden::ecs::ComponentStoreResult add(garden::ecs::EntityHandle entity, Args&&... args)
     {
         if (active_queries) return garden::ecs::ComponentStoreResult::StructuralMutationDuringQuery;
+        if (constructionReentrant() || constructionActive()) return garden::ecs::ComponentStoreResult::InternalError;
         garden::ecs::ComponentEntityKey key;
         auto result = scopedKey(entity, key);
         if (result != garden::ecs::ComponentStoreResult::Success) return result;
@@ -297,6 +398,7 @@ public:
     garden::ecs::ComponentStoreResult remove(garden::ecs::EntityHandle entity)
     {
         if (active_queries) return garden::ecs::ComponentStoreResult::StructuralMutationDuringQuery;
+        if (constructionReentrant() || constructionActive()) return garden::ecs::ComponentStoreResult::InternalError;
         garden::ecs::ComponentEntityKey key;
         auto result = scopedKey(entity, key);
         if (result != garden::ecs::ComponentStoreResult::Success) return result;

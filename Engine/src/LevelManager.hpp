@@ -235,9 +235,11 @@ struct MeshPreloadData {
     MeshPreloadData& operator=(const MeshPreloadData&) = delete;
 };
 
-enum class LevelInstantiationStatus { Completed, InvalidInput, Conflict, AllocationFailure, ConstructionFailure };
+enum class LevelInstantiationStatus { Completed, InvalidInput, Conflict, AllocationFailure, ConstructionFailure, FrameworkInstallFailure };
 struct LevelInstantiationResult {
     LevelInstantiationStatus status = LevelInstantiationStatus::Completed;
+    ConstructionStatus construction_status = ConstructionStatus::Completed;
+    // FrameworkInstallFailure means entities are committed and remain owned by the caller.
     std::vector<garden::ecs::EntityHandle> entities;
     garden::ecs::EntityHandle player{};
     garden::ecs::EntityHandle freecam{};

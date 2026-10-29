@@ -23,7 +23,7 @@ private:
 };
 enum class SceneOperation { None, Initialize, ConfigureReflection, ConfigureGameplayDefaults, Load, LoadAsync, PumpAsyncLoads, Unload, Clear, Activate, Transition, Shutdown };
 enum class ScenePhase { None, CancelWorkers, WaitForRender, ResolveOwnership, Retire, Construct, Rollback, Load, Publish, Complete };
-enum class SceneStatus { Completed, CompletedWithObserverFailure, NotFound, WrongThread, NotInitialized, Busy, InvalidArgument, LoadFailure, ConstructionFailure, OwnershipFailure, LifecycleFailure, Partial, InternalFailure };
+enum class SceneStatus { Completed, CompletedWithObserverFailure, NotFound, WrongThread, NotInitialized, Busy, InvalidArgument, LoadFailure, ConstructionFailure, OwnershipFailure, LifecycleFailure, Partial, InternalFailure, FrameworkInstallFailure };
 struct SceneResult {
     SceneStatus status = SceneStatus::Completed;
     SceneOperation operation = SceneOperation::None;
@@ -33,6 +33,9 @@ struct SceneResult {
     size_t completed_count = 0;
     LifecycleResult lifecycle{};
     LevelInstantiationResult construction{};
+    // True when this operation has no pending cleanup to resume. A failed
+    // framework install may still leave committed entities owned by its scene;
+    // unload or clear retires them.
     bool cleanup_complete = true;
 };
 class ENGINE_API SceneManager {

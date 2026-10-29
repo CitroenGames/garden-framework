@@ -81,6 +81,12 @@ bool testRenderWorldPoseResolver()
     world owner;
     auto& reg = owner.registry;
 
+    // Render fixtures deliberately author child-side links without mirrors.
+    struct ClearParents {
+        entt::registry& reg;
+        ~ClearParents() { reg.clear<ParentComponent>(); }
+    } clearParents{reg};
+
     const entt::entity root = makeEntity(reg, owner, {10, 0, 0});
     const entt::entity child = makeEntity(reg, owner, {1, 2, 0});
     const entt::entity leaf = makeEntity(reg, owner, {0, 0, 2});
@@ -192,6 +198,10 @@ bool testRenderWorldPoseInvalidParents()
     reg.emplace<PresentationTransformComponent>(stale_child, presentation);
     const EntityRef stale_ref{EntityGuid{0xdead, 0xbeef}};
     reg.emplace<ParentComponent>(stale_child, ParentComponent{stale_ref});
+    struct ClearParents {
+        entt::registry& reg;
+        ~ClearParents() { reg.clear<ParentComponent>(); }
+    } clearParents{reg};
     TransformComponent expected = reg.get<TransformComponent>(stale_child);
     expected.position = presentation.position;
     expected.rotation = presentation.rotation;
@@ -247,6 +257,10 @@ bool testRenderWorldPoseCycle()
     EventBus::get().clear();
     world owner;
     auto& reg = owner.registry;
+    struct ClearParents {
+        entt::registry& reg;
+        ~ClearParents() { reg.clear<ParentComponent>(); }
+    } clearParents{reg};
     const entt::entity a = makeEntity(reg, owner, {10, 0, 0});
     const entt::entity b = makeEntity(reg, owner, {0, 20, 0});
     const entt::entity descendant = makeEntity(reg, owner, {0, 0, 3});
@@ -274,6 +288,20 @@ bool rejectedIdentityAttachLeavesFreshEntitiesUntouched(
     const glm::mat4 child_transform = reg.get<TransformComponent>(child).getTransformMatrix();
     const glm::mat4 parent_transform = reg.get<TransformComponent>(parent).getTransformMatrix();
     const glm::mat4 other_transform = reg.get<TransformComponent>(other).getTransformMatrix();
+
+    const auto childIdentity = reg.get<IdentityComponent>(child);
+    const auto parentIdentity = reg.get<IdentityComponent>(parent);
+    const auto otherIdentity = reg.get<IdentityComponent>(other);
+    struct RestoreIdentities {
+        entt::registry& reg;
+        entt::entity child, parent, other;
+        IdentityComponent childIdentity, parentIdentity, otherIdentity;
+        ~RestoreIdentities() {
+            reg.emplace_or_replace<IdentityComponent>(child, childIdentity);
+            reg.emplace_or_replace<IdentityComponent>(parent, parentIdentity);
+            reg.emplace_or_replace<IdentityComponent>(other, otherIdentity);
+        }
+    } restore{reg, child, parent, other, childIdentity, parentIdentity, otherIdentity};
 
     configure(reg, child, parent, other);
     if (Hierarchy::attach(reg, child, parent))
@@ -348,6 +376,11 @@ bool testRejectedReattachPreservesOriginalLink()
     const EntityRef child_ref{reg.get<IdentityComponent>(child).guid};
     const std::vector<EntityRef> original_children =
         reg.get<ChildrenComponent>(original_parent).children;
+    struct RestoreGuid {
+        IdentityComponent& identity;
+        EntityGuid guid;
+        ~RestoreGuid() { identity.guid = guid; }
+    } restore{reg.get<IdentityComponent>(duplicate), reg.get<IdentityComponent>(duplicate).guid};
     reg.get<IdentityComponent>(duplicate).guid =
         reg.get<IdentityComponent>(new_parent).guid;
 
@@ -801,13 +834,27 @@ bool testRetirementHierarchyFence()
     if (!Hierarchy::attach(reg, parent, grandparent) || !Hierarchy::attach(reg, child, parent))
         return fail(name, "setup failed");
     fence.entities = {parent};
-    reg.ctx().get<RetirementFenceBinding>().fence = &fence;
-    if (Hierarchy::attach(reg, outsider, parent) || Hierarchy::attach(reg, parent, outsider))
-        return fail(name, "attach accepted a retiring endpoint");
+    auto& binding = reg.ctx().get<RetirementFenceBinding>();
+    auto* originalFence = binding.fence;
+    binding.fence = &fence;
+    const bool acceptedOutsider = Hierarchy::attach(reg, outsider, parent);
+    const bool acceptedParent = Hierarchy::attach(reg, parent, outsider);
     const auto before = Hierarchy::computeWorldMatrix(reg, child);
-    if (!Hierarchy::retireEntity(reg, parent, fence) || Hierarchy::parentOf(reg, child) != grandparent ||
+    const bool retired = Hierarchy::retireEntity(reg, parent, fence);
+    binding.fence = originalFence;
+    if (acceptedOutsider || acceptedParent)
+        return fail(name, "attach accepted a retiring endpoint");
+    if (!retired || Hierarchy::parentOf(reg, child) != grandparent ||
         !nearMat(before, Hierarchy::computeWorldMatrix(reg, child)))
         return fail(name, "privileged orphan policy failed to preserve the surviving child");
+    // The direct hierarchy phase leaves the retired entity's own components
+    // for world retirement to destroy. This fixture keeps it alive, so finish
+    // that phase's link cleanup before asking the world to retire it normally.
+    reg.remove<ParentComponent>(parent);
+    const auto shutdown = owner.shutdown();
+    if (!shutdown.cleanupComplete())
+        return fail(name, "world shutdown failed: status " + std::to_string(static_cast<int>(shutdown.status)) +
+                    " phase " + std::to_string(static_cast<int>(shutdown.phase)));
     return pass(name);
 }
 std::vector<EntityRef> queuedRetirementEvents;

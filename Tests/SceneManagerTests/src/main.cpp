@@ -16,7 +16,10 @@
 #include <vector>
 #include <stdexcept>
 
-namespace garden::testing { ENGINE_API void failNextScenePublicationForTesting() noexcept; }
+namespace garden::testing {
+ENGINE_API void failNextScenePublicationForTesting() noexcept;
+ENGINE_API void failNextFrameworkInstallForTesting() noexcept;
+}
 
 namespace
 {
@@ -246,6 +249,58 @@ int g_unload_attempts = 0;
 void recordLevelLoaded(const LevelLoadedEvent&) { ++g_level_loaded_count; }
 void throwOnUnload(const SceneUnloadEvent&) { ++g_unload_attempts; throw std::runtime_error("injected observer failure"); }
 
+void testFrameworkInstallFailureOwnsCommittedEntities() {
+    const std::string name = "framework install failure retains committed scene ownership";
+    TempLevel level("framework-fault");
+    if (!level.write(R"({"metadata":{"level_name":"framework"},"entities":[{"name":"owned","type":"Static"}]})")) {
+        check(false, name, "could not write fixture"); return;
+    }
+    world game_world;
+    SceneManager manager;
+    completed(manager.initialize(&game_world, nullptr), name, "initialize failed");
+    auto loaded = manager.loadScene(level.path.string());
+    completed(loaded, name, "load failed");
+    g_level_loaded_count = 0;
+    EventBus::get().sink<LevelLoadedEvent>().connect<&recordLevelLoaded>();
+    garden::testing::failNextFrameworkInstallForTesting();
+    auto failed = manager.activateScene(loaded.scene_id);
+    auto* scene = manager.getScene(loaded.scene_id);
+    check(failed.status == SceneStatus::FrameworkInstallFailure && failed.cleanup_complete &&
+          failed.construction.status == LevelInstantiationStatus::FrameworkInstallFailure && failed.construction.entities.size() == 1,
+          name, "failure result did not describe committed cohort");
+    check(scene && scene->state == SceneLoadState::Failed && !manager.getActiveScene() &&
+          g_level_loaded_count == 0, name, "failed installation published an active scene");
+    check(scene && scene->owned_entities == failed.construction.entities, name, "committed handles not owned");
+    auto handles = failed.construction.entities;
+    for (auto handle : handles)
+        check(game_world.classifyEntityHandle(handle) == EntityHandleClassification::Alive, name, "committed entity missing");
+    check(manager.activateScene(loaded.scene_id).status == SceneStatus::InvalidArgument, name, "failed scene retried");
+    check(manager.resume(failed.operation_handle).status == SceneStatus::InvalidArgument, name, "terminal operation resumed");
+    completed(manager.unloadScene(loaded.scene_id), name, "unload failed");
+    for (auto handle : handles)
+        check(game_world.classifyEntityHandle(handle) == EntityHandleClassification::RetiredGone, name, "owned entity survived unload");
+    EventBus::get().sink<LevelLoadedEvent>().disconnect<&recordLevelLoaded>();
+    completed(manager.shutdown(), name, "shutdown failed");
+}
+
+void testDirectFrameworkInstallFailure() {
+    const std::string name = "direct level load reports committed framework failure";
+    for (bool parallel : {false, true}) {
+        world game_world;
+        LevelManager manager;
+        LevelData level;
+        level.entities.emplace_back();
+        garden::testing::failNextFrameworkInstallForTesting();
+        const auto result = parallel ? manager.instantiateLevelParallel(level, game_world, nullptr)
+                                     : manager.instantiateLevel(level, game_world, nullptr);
+        check(result.status == LevelInstantiationStatus::FrameworkInstallFailure &&
+              result.entities.size() == 1 && !result.rollback.operation.valid() &&
+              game_world.classifyEntityHandle(result.entities.front()) == EntityHandleClassification::Alive,
+              name, "failure must retain the published entity and report no rollback");
+        check(game_world.shutdown().cleanupComplete(), name, "world cleanup failed");
+    }
+}
+
 void testPublicationFailureAndRetry() {
     const std::string name = "publication staging failure retains cohort through partial retirement";
     TempLevel level("publication-fault");
@@ -291,6 +346,70 @@ void testPublicationFailureAndRetry() {
           name, "retry did not publish exactly once");
     EventBus::get().sink<LevelLoadedEvent>().disconnect<&recordLevelLoaded>();
     completed(manager.shutdown(), name, "shutdown failed");
+}
+
+std::vector<EntityCreatedEvent> g_created_events;
+void recordEntityCreated(const EntityCreatedEvent& event) { g_created_events.push_back(event); }
+
+void testLevelTransactionIdentityAndAbort() {
+    const std::string name = "level transaction preserves fresh identity publication and abort captures";
+    EventBus::get().clear();
+    EventBus::get().sink<EntityCreatedEvent>().connect<&recordEntityCreated>();
+    g_created_events.clear();
+    LevelManager levels;
+    LevelData source;
+    LevelEntity fresh;
+    fresh.name = "fresh";
+    LevelEntity restored;
+    restored.name = "restored";
+    restored.reflected_components = nlohmann::json::parse(
+        R"({"IdentityComponent":{"guid":"0123456789abcdef-fedcba9876543210"}})");
+    source.entities.push_back(fresh);
+    source.entities.push_back(restored);
+    TempLevel binary("transaction-binary");
+    check(levels.saveLevelToBinary(binary.path.string(), source), name, "binary save failed");
+    LevelData loaded;
+    check(levels.loadLevelFromBinary(binary.path.string(), loaded), name, "binary load failed");
+    world game_world;
+    const auto success = levels.instantiateLevel(loaded, game_world, nullptr, false);
+    check(success.status == LevelInstantiationStatus::Completed &&
+          success.construction_status == ConstructionStatus::Completed && success.entities.size() == 2,
+          name, "mixed identity cohort did not commit");
+    EventBus::get().flush<EntityCreatedEvent>();
+    check(g_created_events.size() == 1 && success.entities.size() == 2 &&
+          g_created_events[0].handle == success.entities[0] && g_created_events[0].tag == "fresh",
+          name, "fresh/restored event provenance or handle was lost");
+    auto retired = game_world.retireEntities(success.entities);
+    if (retired.operation.valid() && retired.cleanupComplete())
+        game_world.acknowledgeRetirement(retired.operation);
+
+    LevelData failing;
+    LevelEntity broken;
+    broken.name = "broken";
+    broken.type = EntityType::Renderable;
+    broken.mesh_path = "missing_level_transaction_mesh.obj";
+    failing.entities.push_back(broken);
+    FailLifecycleOnce fault;
+    game_world.registry.ctx().emplace<garden::ecs::testing::LifecycleFaultHook>(
+        garden::ecs::testing::LifecycleFaultHook{&fault, &failLifecycleOnce});
+    g_created_events.clear();
+    auto failure = levels.instantiateLevel(failing, game_world, nullptr, false);
+    check(failure.status == LevelInstantiationStatus::ConstructionFailure &&
+          failure.construction_status == ConstructionStatus::ComponentFailure &&
+          failure.entities.size() == 1 && failure.rollback.operation.valid() &&
+          !failure.rollback.cleanupComplete(), name, "failure lost status, capture, or durable token");
+    EventBus::get().flush<EntityCreatedEvent>();
+    check(g_created_events.empty(), name, "aborted entity emitted a create event");
+    if (failure.rollback.operation.valid()) {
+        auto resumed = game_world.resumeRetirement(failure.rollback.operation);
+        check(resumed.cleanupComplete(), name, "abort retry did not complete");
+        if (resumed.cleanupComplete())
+            check(game_world.acknowledgeRetirement(failure.rollback.operation).cleanupComplete(),
+                  name, "abort acknowledgement failed");
+    }
+    game_world.registry.ctx().erase<garden::ecs::testing::LifecycleFaultHook>();
+    EventBus::get().sink<EntityCreatedEvent>().disconnect<&recordEntityCreated>();
+    EventBus::get().clear();
 }
 
 void testThrowingUnloadObserver() {
@@ -433,6 +552,9 @@ int main()
     testSceneOwnsOnlyInstantiatedEntities();
     testOperationIdentityAndHeadless();
     testPublicationFailureAndRetry();
+    testFrameworkInstallFailureOwnsCommittedEntities();
+    testDirectFrameworkInstallFailure();
+    testLevelTransactionIdentityAndAbort();
     testThrowingUnloadObserver();
     testIncompleteShutdownDiagnostic();
 

@@ -26,6 +26,7 @@
 #include "Threading/JobSystem.hpp"
 #include <iostream>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -42,6 +43,11 @@
 #include <glm/gtx/matrix_decompose.hpp>
 
 using json = nlohmann::json;
+
+namespace { std::atomic<bool> fail_framework_install{false}; }
+namespace garden::testing {
+ENGINE_API void failNextFrameworkInstallForTesting() noexcept { fail_framework_install.store(true); }
+}
 
 static constexpr uint32_t LEVEL_BINARY_MAGIC   = 0x47444E4C; // "GDNL"
 static constexpr uint32_t LEVEL_BINARY_VERSION  = 7;
@@ -507,6 +513,7 @@ static void deserializeReflectedComponents(ReflectionRegistry* reflection,
 struct LevelInstantiationPlan
 {
     std::vector<EntityGuid> identity_guids;
+    std::vector<bool> persisted_identities;
     std::vector<json> reflected_components;
     // Parent entity's index in the LevelData cohort, or size_t max for roots.
     std::vector<size_t> parent_indices;
@@ -590,7 +597,7 @@ static LevelInstantiationStatus prepareLevelInstantiation(const LevelData& level
             destination_guids.insert(identity.guid);
     }
 
-    std::vector<bool> has_serialized_identity(entity_count, false);
+    plan.persisted_identities.assign(entity_count, false);
     std::unordered_set<EntityGuid, GuidHash> cohort_guids;
     cohort_guids.reserve(entity_count);
 
@@ -640,12 +647,12 @@ static LevelInstantiationStatus prepareLevelInstantiation(const LevelData& level
             return LevelInstantiationStatus::InvalidInput;
         }
         plan.identity_guids[i] = guid;
-        has_serialized_identity[i] = true;
+        plan.persisted_identities[i] = true;
     }
 
     for (size_t i = 0; i < entity_count; ++i)
     {
-        if (has_serialized_identity[i])
+        if (plan.persisted_identities[i])
             continue;
         EntityGuid guid{};
         do
@@ -1403,64 +1410,55 @@ void LevelManager::setGameplayDefaults(std::string game_mode_class, std::string 
     m_default_game_state_class = game_state_class.empty() ? "GameState" : std::move(game_state_class);
 }
 
+namespace {
+struct PreparedLevelFramework {
+    std::unique_ptr<GameFramework::GameModeBase> mode;
+    std::unique_ptr<GameFramework::GameStateBase> state;
+};
+
+PreparedLevelFramework prepareLevelFramework(const LevelMetadata& metadata,
+                                             const std::string& default_mode,
+                                             const std::string& default_state,
+                                             const std::string& options,
+                                             bool authority)
+{
+    using namespace GameFramework;
+    const std::string mode_class = resolvedGameModeClass(metadata, default_mode, options);
+    const std::string state_class = resolvedGameStateClass(metadata, default_state, options);
+    PreparedLevelFramework prepared;
+    if (authority) {
+        prepared.mode = createGameModeOrFallback(mode_class);
+        if (!prepared.mode) throw std::runtime_error("GameMode construction failed");
+        if (mode_class != prepared.mode->getClassName())
+            LOG_ENGINE_WARN("GameMode '{}' is not registered, falling back to '{}'", mode_class, prepared.mode->getClassName());
+        applyGameModeRuntimeSettings(*prepared.mode, metadata);
+    }
+    prepared.state = createGameStateOrFallback(state_class);
+    if (!prepared.state) throw std::runtime_error("GameState construction failed");
+    if (state_class != prepared.state->getClassName())
+        LOG_ENGINE_WARN("GameState '{}' is not registered, falling back to '{}'", state_class, prepared.state->getClassName());
+    if (!authority) {
+        prepared.state->setAuthorityGameMode(nullptr);
+        prepared.state->setGameModeClassName(mode_class);
+    }
+    return prepared;
+}
+
+void installLevelFramework(world& game_world, PreparedLevelFramework prepared)
+{
+    game_world.shutdownGameplayFramework();
+    game_world.setAuthorityGameMode(std::move(prepared.mode));
+    game_world.setGameState(std::move(prepared.state));
+}
+}
+
 void LevelManager::applyGameplayFrameworkSettings(const LevelMetadata& metadata,
                                                   world& game_world,
                                                   const std::string& options,
                                                   bool create_authority_game_mode) const
 {
-    using namespace GameFramework;
-
-    const std::string game_mode_class =
-        resolvedGameModeClass(metadata, m_default_game_mode_class, options);
-    const std::string game_state_class =
-        resolvedGameStateClass(metadata, m_default_game_state_class, options);
-
-    if (create_authority_game_mode)
-    {
-        auto game_mode = createGameModeOrFallback(game_mode_class);
-        if (!game_mode)
-        {
-            LOG_ENGINE_WARN("Failed to create GameMode '{}'", game_mode_class);
-            throw std::runtime_error("GameMode construction failed");
-        }
-
-        if (game_mode_class != game_mode->getClassName())
-        {
-            LOG_ENGINE_WARN("GameMode '{}' is not registered, falling back to '{}'",
-                            game_mode_class, game_mode->getClassName());
-        }
-
-        auto game_state = createGameStateOrFallback(game_state_class);
-        if (!game_state)
-        {
-            LOG_ENGINE_WARN("Failed to create GameState '{}'", game_state_class);
-            throw std::runtime_error("GameState construction failed");
-        }
-        else if (game_state_class != game_state->getClassName())
-        {
-            LOG_ENGINE_WARN("GameState '{}' is not registered, falling back to '{}'",
-                            game_state_class, game_state->getClassName());
-        }
-
-        applyGameModeRuntimeSettings(*game_mode, metadata);
-        game_world.shutdownGameplayFramework();
-        game_world.setAuthorityGameMode(std::move(game_mode));
-        game_world.setGameState(std::move(game_state));
-        return;
-    }
-
-    auto game_state = createGameStateOrFallback(game_state_class);
-    if (!game_state)
-    {
-        LOG_ENGINE_WARN("Failed to create client GameState '{}'", game_state_class);
-        throw std::runtime_error("client GameState construction failed");
-    }
-
-    game_state->setAuthorityGameMode(nullptr);
-    game_state->setGameModeClassName(game_mode_class);
-    game_world.shutdownGameplayFramework();
-    game_world.setAuthorityGameMode(nullptr);
-    game_world.setGameState(std::move(game_state));
+    installLevelFramework(game_world, prepareLevelFramework(metadata, m_default_game_mode_class,
+                          m_default_game_state_class, options, create_authority_game_mode));
 }
 
 bool LevelManager::loadLevel(const std::string& path, LevelData& out_level_data)
@@ -3516,7 +3514,21 @@ LevelInstantiationResult LevelManager::instantiateLevelParallel(
     bool create_authority_game_mode)
 {
     LevelInstantiationResult result;
-    world::ConstructionTransaction transaction{&game_world};
+    ConstructionHandle transaction{};
+    bool transaction_active = false;
+    struct ConstructionStopped {};
+    const auto setConstructionFailure = [&](ConstructionStatus status) {
+        result.construction_status = status;
+        switch (status) {
+        case ConstructionStatus::InvalidInput: result.status = LevelInstantiationStatus::InvalidInput; break;
+        case ConstructionStatus::AllocationFailure: result.status = LevelInstantiationStatus::AllocationFailure; break;
+        case ConstructionStatus::Conflict:
+        case ConstructionStatus::QueryActive:
+        case ConstructionStatus::WrongThread:
+        case ConstructionStatus::Reentrant: result.status = LevelInstantiationStatus::Conflict; break;
+        default: result.status = LevelInstantiationStatus::ConstructionFailure; break;
+        }
+    };
     glm::vec3 previous_gravity{};
     float previous_delta = 0.0f;
     bool settings_captured = false;
@@ -3528,6 +3540,10 @@ LevelInstantiationResult LevelManager::instantiateLevelParallel(
     LevelInstantiationPlan instantiation_plan;
     result.status = prepareLevelInstantiation(level_data, game_world.registry, instantiation_plan);
     if (result.status != LevelInstantiationStatus::Completed) {
+        result.construction_status = result.status == LevelInstantiationStatus::InvalidInput
+            ? ConstructionStatus::InvalidInput
+            : result.status == LevelInstantiationStatus::Conflict
+                ? ConstructionStatus::Conflict : ConstructionStatus::ComponentFailure;
         return result;
     }
     result.entities.reserve(instantiation_plan.identity_guids.size());
@@ -3618,59 +3634,35 @@ LevelInstantiationResult LevelManager::instantiateLevelParallel(
     // Restore the entire identity cohort before changing settings, publishing
     // outputs, or giving entities to feature services. A failed restore leaves
     // the destination and caller-owned outputs untouched.
-    std::unordered_map<EntityGuid, size_t, GuidHash> cohort_indices;
-    cohort_indices.reserve(instantiation_plan.identity_guids.size());
-    for (size_t i = 0; i < instantiation_plan.identity_guids.size(); ++i)
-        cohort_indices.emplace(instantiation_plan.identity_guids[i], i);
-
-    std::vector<entt::entity> created_entities(level_data.entities.size());
-    for (auto& entity : created_entities)
-        entity = entt::null;
-    std::vector<size_t> identity_occurrences(instantiation_plan.identity_guids.size(), 0);
-    auto& restored_handles = transaction.entities;
-    std::vector<EntityRef> references;
-    references.reserve(instantiation_plan.identity_guids.size());
-    for (const EntityGuid& guid : instantiation_plan.identity_guids)
-        references.push_back(EntityRef{guid});
-    auto restored = game_world.restoreScopedEntities(references, transaction);
-    if (restored.status != ScopedRestoreStatus::Completed) {
-        result.status = restored.status == ScopedRestoreStatus::AllocationFailure ? LevelInstantiationStatus::AllocationFailure :
-            restored.status == ScopedRestoreStatus::Conflict || restored.status == ScopedRestoreStatus::QueryActive ? LevelInstantiationStatus::Conflict :
-            restored.status == ScopedRestoreStatus::InvalidInput ? LevelInstantiationStatus::InvalidInput : LevelInstantiationStatus::ConstructionFailure;
-        result.entities = std::move(restored.entities);
-        result.rollback = restored.rollback;
+    std::vector<entt::entity> created_entities(level_data.entities.size(), static_cast<entt::entity>(entt::null));
+    std::vector<StagedEntity> staged_entities(level_data.entities.size());
+    // Reserve supplied identities first so fresh GUID generation cannot collide
+    // with a persisted identity that has not yet been staged.
+    std::vector<size_t> staging_order;
+    staging_order.reserve(level_data.entities.size());
+    for (size_t i = 0; i < level_data.entities.size(); ++i)
+        if (instantiation_plan.persisted_identities[i]) staging_order.push_back(i);
+    for (size_t i = 0; i < level_data.entities.size(); ++i)
+        if (!instantiation_plan.persisted_identities[i]) staging_order.push_back(i);
+    PreparedLevelFramework prepared_framework;
+    const auto begin = game_world.beginConstruction();
+    if (begin.status != ConstructionStatus::Completed) {
+        setConstructionFailure(begin.status);
         return result;
     }
-    result.entities = std::move(restored.entities);
-    const size_t restored_count = restored_handles.size();
-
-    // Internal legacy bridge: take one snapshot for the level component and
-    // physics passes, which still use raw entities. Scoped restore owns identity
-    // construction; this lookup does not create or alter identity.
-    bool valid_cohort = restored_count == instantiation_plan.identity_guids.size() &&
-                        result.entities.size() == restored_count;
-    for (size_t i = 0; valid_cohort && i < restored_count; ++i)
-        if (result.entities[i] != restored_handles[i] ||
-            game_world.persistedReference(restored_handles[i]).guid != instantiation_plan.identity_guids[i])
-            valid_cohort = false;
-    for (auto [entity, identity] : game_world.registry.view<IdentityComponent>().each())
-    {
-        const auto it = cohort_indices.find(identity.guid);
-        if (it != cohort_indices.end())
-        {
-            ++identity_occurrences[it->second];
-            if (it->second < restored_count)
-                created_entities[it->second] = entity;
+    transaction = begin.transaction;
+    transaction_active = true;
+    for (const size_t i : staging_order) {
+        const auto staged = instantiation_plan.persisted_identities[i]
+            ? game_world.restoreStagedEntity(transaction, EntityRef{instantiation_plan.identity_guids[i]}, level_data.entities[i].name)
+            : game_world.createStagedEntity(transaction, level_data.entities[i].name);
+        if (staged.status != ConstructionStatus::Completed) {
+            setConstructionFailure(staged.status);
+            throw ConstructionStopped{};
         }
+        instantiation_plan.identity_guids[i] = staged.reference.guid;
+        staged_entities[i] = staged.entity;
     }
-    for (size_t i = 0; i < created_entities.size(); ++i)
-    {
-        if (identity_occurrences[i] != 1 || created_entities[i] == entt::null)
-            valid_cohort = false;
-    }
-
-    if (!valid_cohort)
-        throw std::runtime_error("failed to restore scoped identity cohort");
 
     entt::entity player_entity = entt::null;
     entt::entity freecam_entity = entt::null;
@@ -3712,6 +3704,20 @@ LevelInstantiationResult LevelManager::instantiateLevelParallel(
         return nullptr;
     };
 
+    // Raw legacy authoring is guarded against transaction reentry from hooks.
+    {
+    world::ConstructionAuthoringScope authoring(game_world, transaction);
+    if (authoring.status() != ConstructionStatus::Completed) {
+        setConstructionFailure(authoring.status());
+        throw ConstructionStopped{};
+    }
+    for (size_t i = 0; i < staged_entities.size(); ++i) {
+        created_entities[i] = game_world.constructionEntity(transaction, staged_entities[i]);
+        if (created_entities[i] == entt::null) {
+            setConstructionFailure(ConstructionStatus::TransactionFailed);
+            throw ConstructionStopped{};
+        }
+    }
     // Create all entities (same logic as instantiateLevel, using preloaded data)
     for (size_t entity_index = 0; entity_index < level_data.entities.size(); ++entity_index)
     {
@@ -3729,7 +3735,7 @@ LevelInstantiationResult LevelManager::instantiateLevelParallel(
         transform.scale = entity_data.scale;
 
         // Add Tag
-        game_world.registry.emplace<TagComponent>(e, entity_data.name);
+        game_world.registry.get_or_emplace<TagComponent>(e, entity_data.name);
 
         // Load and add Mesh (using preloaded data)
         if (entity_data.type == EntityType::Renderable ||
@@ -3921,30 +3927,53 @@ LevelInstantiationResult LevelManager::instantiateLevelParallel(
         }
     }
 
+    prepared_framework = prepareLevelFramework(level_data.metadata, m_default_game_mode_class,
+                                               m_default_game_state_class, "", create_authority_game_mode);
+    }
+
     settings_modified = true;
     game_world.setGravity(level_data.metadata.gravity);
     game_world.setFixedDelta(level_data.metadata.fixed_delta);
-    applyGameplayFrameworkSettings(level_data.metadata, game_world, "", create_authority_game_mode);
-
+    auto committed = game_world.commitConstruction(transaction);
+    if (committed.status != ConstructionStatus::Completed) {
+        setConstructionFailure(committed.status);
+        throw ConstructionStopped{};
+    }
+    transaction_active = false;
+    result.entities.resize(staging_order.size());
+    for (size_t i = 0; i < staging_order.size(); ++i)
+        result.entities[staging_order[i]] = committed.entities[i];
+    // Publication is complete. Framework shutdown/bind effects are outside
+    // the cohort and cannot be reported as an aborted construction.
+    try {
+        if (fail_framework_install.exchange(false)) throw std::runtime_error("injected framework install failure");
+        installLevelFramework(game_world, std::move(prepared_framework));
+    }
+    catch (...) { result.status = LevelInstantiationStatus::FrameworkInstallFailure; }
     for (size_t i = 0; i < created_entities.size(); ++i) {
         if (created_entities[i] == player_entity) result.player = result.entities[i];
         if (created_entities[i] == freecam_entity) result.freecam = result.entities[i];
         if (created_entities[i] == player_rep_entity) result.player_rep = result.entities[i];
     }
-    LOG_ENGINE_INFO("Level instantiation complete (parallel): {} entities", level_data.entities.size());
-    transaction.committed = true;
     return result;
+    } catch (const ConstructionStopped&) {
+        // Preserve the transaction operation's exact status.
     } catch (const std::bad_alloc&) {
         result.status = LevelInstantiationStatus::AllocationFailure;
+        result.construction_status = ConstructionStatus::AllocationFailure;
+        if (transaction_active) game_world.failConstruction(transaction);
     } catch (...) {
         result.status = LevelInstantiationStatus::ConstructionFailure;
+        result.construction_status = ConstructionStatus::ComponentFailure;
+        if (transaction_active) game_world.failConstruction(transaction);
     }
     result.player = {};
     result.freecam = {};
     result.player_rep = {};
-    if (!transaction.entities.empty()) {
-        result.entities.assign(transaction.entities.begin(), transaction.entities.end());
-        result.rollback = game_world.abortUnpublished(transaction);
+    if (transaction_active) {
+        const auto aborted = game_world.abortConstruction(transaction);
+        result.entities.assign(aborted.captured.begin(), aborted.captured.end());
+        result.rollback = aborted.rollback;
     }
     if (settings_captured && settings_modified) {
         try {

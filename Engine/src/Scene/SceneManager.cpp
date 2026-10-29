@@ -181,7 +181,8 @@ bool SceneManager::activateStep(SceneId id) {
     if (current.phase != ScenePhase::Rollback) {
         current.phase = ScenePhase::Construct;
         current.construction = level_manager.instantiateLevelParallel(s.level_data, *game_world, render_api);
-        if (current.construction.status == LevelInstantiationStatus::Completed) {
+        if (current.construction.status == LevelInstantiationStatus::Completed ||
+            current.construction.status == LevelInstantiationStatus::FrameworkInstallFailure) {
             // LevelManager has committed this cohort. Keep its original handles in
             // the operation while all potentially throwing scene records are staged.
             // Nothing is published to the scene until every allocation succeeds.
@@ -210,6 +211,14 @@ bool SceneManager::activateStep(SceneId id) {
                 s.player_reference = player_ref;
                 s.freecam_reference = freecam_ref;
                 s.player_rep_reference = player_rep_ref;
+                if (current.construction.status == LevelInstantiationStatus::FrameworkInstallFailure) {
+                    // The cohort is committed and belongs to this scene even
+                    // though framework effects may be only partially installed.
+                    // Do not retry activation or publish a successful load.
+                    s.state = SceneLoadState::Failed;
+                    current.status = SceneStatus::FrameworkInstallFailure;
+                    return false;
+                }
                 s.state = SceneLoadState::Active;
                 active_scene_id = id;
                 current.phase = ScenePhase::Publish;
@@ -283,7 +292,9 @@ bool SceneManager::activateStep(SceneId id) {
         auto ack = game_world->acknowledgeRetirement(current.lifecycle.operation);
         if (!ack.cleanupComplete()) { current.lifecycle = ack; current.construction.rollback = ack; current.status = SceneStatus::LifecycleFailure; current.cleanup_complete = false; return false; }
     }
-    current.cleanup_complete = true; current.status = SceneStatus::ConstructionFailure; s.state = SceneLoadState::Loaded; return false;
+    current.cleanup_complete = true; current.status = SceneStatus::ConstructionFailure;
+    s.state = SceneLoadState::Loaded;
+    return false;
 }
 SceneResult SceneManager::advance() {
     try {

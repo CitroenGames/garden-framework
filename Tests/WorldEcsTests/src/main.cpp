@@ -1,11 +1,17 @@
 #include "world.hpp"
 #include "ECS/ComponentOperations.hpp"
+#include "Events/EventBus.hpp"
 
 #include <array>
 #include <iostream>
 #include <type_traits>
+#include <thread>
 #include <utility>
 #include <vector>
+
+struct EventBusTestAccess {
+    static void failNextCreatedBatchAllocation(EventBus& bus) noexcept { bus.failNextCreatedBatchAllocation = true; }
+};
 
 struct WorldValue {
     static inline int constructed = 0;
@@ -33,6 +39,23 @@ template<> struct ComponentType<QueryValue> {
 using namespace garden::ecs;
 namespace {
 int failures = 0;
+world* reentrantWorld = nullptr;
+ConstructionHandle reentrantHandle{};
+ConstructionStatus reentrantStatus = ConstructionStatus::Completed;
+bool reentrantCapturesEmpty = false;
+void probeReentrantCommit(entt::registry&, entt::entity) {
+    const auto result = reentrantWorld->commitConstruction(reentrantHandle);
+    reentrantStatus = result.status;
+    reentrantCapturesEmpty = result.captured.empty() && result.entities.empty();
+}
+void corruptStagedIdentity(entt::registry& registry, entt::entity entity) {
+    registry.get<IdentityComponent>(entity).guid = {};
+}
+bool failHierarchyOnce(void* context, LifecyclePhase phase) noexcept {
+    auto& armed = *static_cast<bool*>(context);
+    if (armed && phase == LifecyclePhase::Hierarchy) { armed = false; return true; }
+    return false;
+}
 void check(bool condition, const char* name) {
     std::cout << (condition ? "[PASS] " : "[FAIL] ") << name << '\n';
     if (!condition) ++failures;
@@ -636,6 +659,136 @@ void engineAdapters() {
           w.add<PlayerComponent>(second) == ComponentStoreResult::StaleEntity,
           "adapter rejects stale handles");
 }
+void stagedConstruction(ComponentOwnerId owner) {
+    world w;
+    const auto existing = createForTest(w).entity;
+    check(w.add<TransformComponent>(existing) == ComponentStoreResult::Success, "setup existing component");
+    const auto begin = w.beginConstruction();
+    check(begin.status == ConstructionStatus::Completed && begin.transaction.valid(), "begin staged construction");
+    check(w.beginConstruction().status == ConstructionStatus::Conflict, "one active construction");
+    world other;
+    check(other.constructionStatus(begin.transaction) == ConstructionStatus::WrongWorld, "foreign transaction rejected");
+    ConstructionStatus threadStatus = ConstructionStatus::Completed;
+    std::thread worker([&] { threadStatus = w.constructionStatus(begin.transaction); }); worker.join();
+    check(threadStatus == ConstructionStatus::WrongThread, "wrong thread rejected");
+    const auto first = w.createStagedEntity(begin.transaction, "hidden");
+    const EntityRef saved{generateEntityGuid()};
+    const auto second = w.restoreStagedEntity(begin.transaction, saved);
+    check(first.status == ConstructionStatus::Completed && second.status == ConstructionStatus::Completed &&
+          w.restoreStagedEntity(begin.transaction, saved).status == ConstructionStatus::Conflict,
+          "stage fresh and restored identities and reserve duplicate");
+    const auto otherTx = other.beginConstruction();
+    const auto foreignCommit = w.commitConstruction(otherTx.transaction);
+    ConstructionCommitResult wrongThreadCommit{};
+    std::thread wrongCommitThread([&] { wrongThreadCommit = w.commitConstruction(begin.transaction); });
+    wrongCommitThread.join();
+    check(foreignCommit.status == ConstructionStatus::WrongWorld && foreignCommit.captured.empty() &&
+          wrongThreadCommit.status == ConstructionStatus::WrongThread && wrongThreadCommit.captured.empty(),
+          "foreign and wrong-thread commits do not expose captures");
+    const auto otherMember = other.restoreStagedEntity(otherTx.transaction, saved);
+    const auto otherCommit = other.commitConstruction(otherTx.transaction);
+    check(otherMember.status == ConstructionStatus::Completed && otherCommit.status == ConstructionStatus::Completed &&
+          otherCommit.entities.size() == 1 && otherCommit.entities[0] != second.captured,
+          "same identity independently restored in another world");
+    check(w.add<WorldValue>(existing, 9) != ComponentStoreResult::Success &&
+          w.remove<TransformComponent>(existing) != ComponentStoreResult::Success,
+          "transaction rejects ordinary structural edits to published entities");
+    check(w.shutdown().status == LifecycleStatus::Conflict && w.resetWorld().status == LifecycleStatus::Conflict,
+          "shutdown and reset reject active transaction");
+    check(w.add<QueryValue>(begin.transaction, first.entity, QueryValue{8}).component_status == ComponentStoreResult::Success &&
+          ComponentCatalog::instance().unregisterOwner(owner) == ComponentCatalogResult::InUse,
+          "staged store-backed value retains provider lease");
+    QueryValue* invalidOut = reinterpret_cast<QueryValue*>(1); bool invalidHas = true;
+    check(w.get<QueryValue>(otherTx.transaction, first.entity, invalidOut).transaction_status != ConstructionStatus::Completed && !invalidOut &&
+          w.has<QueryValue>(otherTx.transaction, first.entity, invalidHas).transaction_status != ConstructionStatus::Completed && !invalidHas,
+          "foreign capabilities clear lookup outputs");
+    ConstructionStatus queryStatus = ConstructionStatus::Completed;
+    bool queryCapturesEmpty = false;
+    w.query<TransformComponent>([&](EntityHandle, TransformComponent&) {
+        const auto rejected = w.commitConstruction(begin.transaction);
+        queryStatus = rejected.status; queryCapturesEmpty = rejected.captured.empty();
+    });
+    check(queryStatus == ConstructionStatus::QueryActive && queryCapturesEmpty, "active query commit does not expose captures");
+    bool hasValue = false;
+    reentrantWorld = &w; reentrantHandle = begin.transaction;
+    w.registry.on_construct<TransformComponent>().connect<&probeReentrantCommit>();
+    const auto added = w.add<TransformComponent>(begin.transaction, first.entity);
+    w.registry.on_construct<TransformComponent>().disconnect<&probeReentrantCommit>();
+    check(reentrantStatus == ConstructionStatus::Reentrant && reentrantCapturesEmpty,
+          "reentrant commit does not expose captures");
+    const auto has = w.has<TransformComponent>(begin.transaction, first.entity, hasValue);
+    TransformComponent* value = nullptr;
+    check(added.component_status == ComponentStoreResult::Success && has.component_status == ComponentStoreResult::Success && hasValue &&
+          w.get<TransformComponent>(begin.transaction, first.entity, value).component_status == ComponentStoreResult::Success && value,
+          "staged typed operations use engine adapter");
+    TransformComponent* ordinary = nullptr;
+    size_t seen = 0;
+    w.query<TransformComponent>([&](EntityHandle, TransformComponent&) { ++seen; });
+    check(!w.isEntityValid(first.captured) && w.scopedEntity(first.reference) == EntityHandle{} &&
+          w.persistedReference(first.captured).isNull() && w.findEntityByTag("hidden").isNull() && seen == 1 &&
+          w.get<TransformComponent>(first.captured, ordinary) != ComponentStoreResult::Success,
+          "staged members hidden from ordinary garden operations");
+    check(w.resolveStagedReference(begin.transaction, saved).entity == second.entity, "resolve staged reference");
+    EventBusTestAccess::failNextCreatedBatchAllocation(EventBus::get());
+    const auto failedCommit = w.commitConstruction(begin.transaction);
+    check(failedCommit.status == ConstructionStatus::EventQueueFailure && failedCommit.captured.size() == 2 &&
+          w.constructionStatus(begin.transaction) == ConstructionStatus::Completed &&
+          w.resolveStagedReference(begin.transaction, saved).status == StagedLookupStatus::Found,
+          "event queue failure preserves transaction for commit retry");
+    const auto committed = w.commitConstruction(begin.transaction);
+    check(committed.status == ConstructionStatus::Completed && committed.entities.size() == 2 &&
+          committed.entities[0] == first.captured && committed.entities[1] == second.captured &&
+          w.isEntityValid(first.captured) && w.isEntityValid(second.captured), "commit publishes ordered cohort");
+    check(w.constructionStatus(begin.transaction) == ConstructionStatus::StaleTransaction, "committed token stale");
+    const auto next = w.beginConstruction();
+    const auto abandoned = w.createStagedEntity(next.transaction);
+    const auto staleCommit = w.commitConstruction(begin.transaction);
+    const auto invalidCommit = w.commitConstruction(ConstructionHandle{});
+    check(staleCommit.status == ConstructionStatus::StaleTransaction && staleCommit.captured.empty() &&
+          invalidCommit.status == ConstructionStatus::InvalidInput && invalidCommit.captured.empty(),
+          "stale and invalid commits do not expose later transaction captures");
+    bool armed = true;
+    w.registry.ctx().emplace<testing::LifecycleFaultHook>(testing::LifecycleFaultHook{&armed, &failHierarchyOnce});
+    const auto aborted = w.abortConstruction(next.transaction);
+    check(aborted.rollback.status == LifecycleStatus::Partial && aborted.captured.size() == 1,
+          "partial abort retains captures for retry");
+    w.registry.ctx().erase<testing::LifecycleFaultHook>();
+    const auto resumed = w.resumeRetirement(aborted.rollback.operation);
+    check(aborted.status == ConstructionStatus::Completed && resumed.cleanupComplete() &&
+          aborted.captured.size() == 1 && aborted.captured.front() == abandoned.captured &&
+          !w.isEntityValid(abandoned.captured) && aborted.rollback.operation.valid(), "abort retains exact captures and rollback operation");
+    check(w.beginConstruction().status == ConstructionStatus::Conflict, "abort requires acknowledgement");
+    LifecycleResult wrongResume, wrongAck, wrongShutdown, wrongReset;
+    std::thread wrongThread([&] { wrongResume = w.resumeRetirement(aborted.rollback.operation);
+        wrongAck = w.acknowledgeRetirement(aborted.rollback.operation);
+        wrongShutdown = w.shutdown(); wrongReset = w.resetWorld(); });
+    wrongThread.join();
+    check(wrongResume.status == LifecycleStatus::WrongThread && wrongAck.status == LifecycleStatus::WrongThread &&
+          wrongShutdown.status == LifecycleStatus::WrongThread && wrongReset.status == LifecycleStatus::WrongThread &&
+          aborted.captured.front() == abandoned.captured, "wrong thread cannot resume, acknowledge, shutdown or reset");
+    check(w.resumeRetirement(aborted.rollback.operation).cleanupComplete() && aborted.captured.front() == abandoned.captured,
+          "terminal retry preserves capture span");
+    check(w.acknowledgeRetirement(aborted.rollback.operation).cleanupComplete(), "acknowledge staged rollback");
+    check(w.acknowledgeRetirement(aborted.rollback.operation).status == LifecycleStatus::UnknownOperation &&
+          w.constructionStatus(next.transaction) == ConstructionStatus::StaleTransaction,
+          "acknowledged token and staged transaction are stale");
+    const auto poisoned = w.beginConstruction();
+    const auto victim = w.createStagedEntity(poisoned.transaction);
+    TransformComponent* staleOut = reinterpret_cast<TransformComponent*>(1);
+    check(w.get<TransformComponent>(poisoned.transaction, first.entity, staleOut).transaction_status == ConstructionStatus::Conflict && !staleOut,
+          "stale member capability cannot access later transaction");
+    w.registry.on_construct<TransformComponent>().connect<&corruptStagedIdentity>();
+    const auto poisonedAdd = w.add<TransformComponent>(poisoned.transaction, victim.entity);
+    w.registry.on_construct<TransformComponent>().disconnect<&corruptStagedIdentity>();
+    const auto poisonedCommit = w.commitConstruction(poisoned.transaction);
+    check(poisonedAdd.transaction_status == ConstructionStatus::TransactionFailed &&
+          poisonedCommit.status == ConstructionStatus::TransactionFailed && poisonedCommit.captured.size() == 1 &&
+          poisonedCommit.captured.front() == victim.captured,
+          "callback identity tampering poisons add and blocks commit");
+    const auto poisonAbort = w.abortConstruction(poisoned.transaction);
+    check(finishFixtureRollback(w, poisonAbort.rollback), "poisoned construction aborts safely");
+}
+
 }
 
 int main() {
@@ -662,6 +815,7 @@ int main() {
     teardown();
     queries();
     engineAdapters();
+    stagedConstruction(owner);
     check(WorldValue::constructed == WorldValue::destroyed, "all component values destroyed exactly once");
     check(catalog.unregisterOwner(owner) == ComponentCatalogResult::Success, "worlds release catalog leases");
     return failures ? 1 : 0;

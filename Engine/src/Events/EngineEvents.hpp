@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 #include "Components/IdentityComponent.hpp"
+#include "ECS/EntityHandle.hpp"
 
 // --- Physics Events ---
 
@@ -43,6 +44,7 @@ struct EntityCreatedEvent
 {
     EntityRef ref;
     std::string tag;
+    garden::ecs::EntityHandle handle;
 };
 
 struct EntityDestroyedEvent

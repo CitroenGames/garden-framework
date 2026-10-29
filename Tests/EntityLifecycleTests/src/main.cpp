@@ -12,6 +12,11 @@
 
 struct LifecycleValue { int value = 0; };
 struct ProviderValue { int value = 0; };
+struct EventBusTestAccess {
+    static void failNextCreatedBatchAllocation(EventBus& bus) noexcept {
+        bus.failNextCreatedBatchAllocation = true;
+    }
+};
 namespace garden::ecs {
 template<> struct ComponentType<LifecycleValue> {
     static constexpr ComponentKey key{"garden.tests.LifecycleValue", 1};
@@ -143,6 +148,75 @@ bool fail_destroy_once = false;
 int construction_side_effects = 0;
 std::vector<EntityCreatedEvent> created_events;
 void onCreated(const EntityCreatedEvent& event) { created_events.push_back(event); }
+std::vector<std::string> created_attempts;
+bool created_throw = false;
+bool created_reenter = false;
+bool created_reentry_rejected = false;
+bool created_enqueue = false;
+bool created_clear = false;
+struct LegacyFifoEvent {};
+void onLegacyFifo(const LegacyFifoEvent&) { created_attempts.push_back("legacy"); }
+void onCreatedFifo(const EntityCreatedEvent& event)
+{
+    created_attempts.push_back(event.tag);
+    if (created_reenter) {
+        created_reenter = false;
+        try { EventBus::get().flush<EntityCreatedEvent>(); }
+        catch (const std::logic_error&) { created_reentry_rejected = true; }
+    }
+    if (created_enqueue) {
+        created_enqueue = false;
+        EventBus::get().emplace<EntityCreatedEvent>(EntityRef{}, "new", EntityHandle{});
+    }
+    if (created_clear) {
+        created_clear = false;
+        EventBus::get().clear();
+        EventBus::get().queue(EntityCreatedEvent{EntityRef{}, "after clear", {}});
+    }
+    if (created_throw) { created_throw = false; throw std::runtime_error("created observer"); }
+}
+
+bool createdFifoContract()
+{
+    auto& bus = EventBus::get();
+    bus.clear();
+    created_attempts.clear();
+    bus.sink<EntityCreatedEvent>().connect<&onCreatedFifo>();
+    bus.sink<LegacyFifoEvent>().connect<&onLegacyFifo>();
+    std::vector<EntityCreatedEvent> batch{{EntityRef{}, "one", {}}, {EntityRef{}, "two", {}}};
+    bus.queue(EntityCreatedEvent{EntityRef{}, "pending", {}});
+    EventBusTestAccess::failNextCreatedBatchAllocation(bus);
+    bool ok = !bus.queueEntityCreatedBatch(std::move(batch)) && batch.size() == 2 &&
+        batch[0].tag == "one" && batch[1].tag == "two";
+    bus.flush<EntityCreatedEvent>();
+    ok &= created_attempts == std::vector<std::string>{"pending"};
+    created_attempts.clear();
+    ok &= bus.queueEntityCreatedBatch(std::move(batch)) && batch.empty();
+    bus.queue(EntityCreatedEvent{EntityRef{}, "three", {}});
+    bus.queue(LegacyFifoEvent{});
+    created_throw = true;
+    try { bus.flush<EntityCreatedEvent>(); ok = false; }
+    catch (const std::runtime_error&) {}
+    ok &= created_attempts == std::vector<std::string>{"one"};
+    created_reenter = true;
+    created_reentry_rejected = false;
+    created_enqueue = true;
+    bus.flush();
+    ok &= created_reentry_rejected && created_attempts == std::vector<std::string>{"one", "two", "three", "legacy"};
+    bus.flush<EntityCreatedEvent>();
+    ok &= created_attempts == std::vector<std::string>{"one", "two", "three", "legacy", "new"};
+    bus.queue(EntityCreatedEvent{EntityRef{}, "clear", {}});
+    bus.queue(EntityCreatedEvent{EntityRef{}, "cancelled", {}});
+    created_clear = true;
+    bus.flush<EntityCreatedEvent>();
+    ok &= created_attempts == std::vector<std::string>{"one", "two", "three", "legacy", "new", "clear"};
+    bus.flush<EntityCreatedEvent>();
+    ok &= created_attempts == std::vector<std::string>{"one", "two", "three", "legacy", "new", "clear", "after clear"};
+    bus.sink<EntityCreatedEvent>().disconnect<&onCreatedFifo>();
+    bus.sink<LegacyFifoEvent>().disconnect<&onLegacyFifo>();
+    bus.clear();
+    return check(ok, "creation batch allocation failure, FIFO, observer failure, snapshot, clear and reentry");
+}
 void onRestoreConstruct(entt::registry& registry, entt::entity entity)
 {
     failed_restore_raw = entity;
@@ -165,7 +239,8 @@ bool rollbackAndCreationEvent()
     const auto ref = w.persistedReference(created);
     EventBus::get().flush<EntityCreatedEvent>();
     bool ok = check(created_events.size() == 1 && created_events[0].ref == ref &&
-                    created_events[0].tag == "created tag", "normal creation queues tagged event");
+                    created_events[0].tag == "created tag" && created_events[0].handle == created,
+                    "normal creation queues tagged event with world-scoped handle");
     created_events.clear();
     observed_world = &w;
     construction_side_effects = 0;
@@ -176,10 +251,11 @@ bool rollbackAndCreationEvent()
     const size_t destroyed_before = events.size();
     const auto result = w.restoreScopedEntity(reference);
     construct.release();
+    const auto captured = result.entities.empty() ? EntityHandle{} : result.entities.front();
     const auto* fence = w.registry.ctx().find<RetirementFenceBinding>();
     ok &= check(result.status == ScopedRestoreStatus::ConstructionFailure && result.rollback.operation.valid() && construction_side_effects == 1 &&
                 w.registry.valid(failed_restore_raw) &&
-                w.retirementState(failed_restore_handle).status == LifecycleStatus::Pending &&
+                failed_restore_handle == EntityHandle{} && w.retirementState(captured).status == LifecycleStatus::Pending &&
                 fence && fence->fence->blocks(failed_restore_raw) && events.size() == destroyed_before,
                 "failed restore retains fenced unpublished entity after cleanup failure");
     destroy.release();
@@ -394,7 +470,8 @@ bool exhaustionBeforeCreation()
     const EntityRef refs[] = {{generateEntityGuid()}, {generateEntityGuid()}};
     const auto rejected = w.restoreScopedEntities(refs);
     LifecycleTestAccess::exchangeEntitySerial(w, serial);
-    bool ok = rejected.status == ScopedRestoreStatus::AllocationFailure && rejected.entities.empty() &&
+    const bool unexpectedRollbackCleaned = finishFixtureRollback(w, rejected.rollback);
+    bool ok = unexpectedRollbackCleaned && rejected.status == ScopedRestoreStatus::AllocationFailure && rejected.entities.empty() &&
         !rejected.rollback.operation.valid() && w.registry.storage<entt::entity>().free_list() == before &&
         w.isEntityValid(sentinel.entity);
     const auto allocator = LifecycleTestAccess::exchangeWorldAllocator(UINT64_MAX);
@@ -474,7 +551,7 @@ int main()
     ComponentId id{};
     if (catalog.registerComponent(descriptor, id) != ComponentCatalogResult::Success) return 1;
     EventBus::get().sink<EntityDestroyedEvent>().connect<&onDestroyed>();
-    const bool ok = queueAndQuery() & fifoAndObserverRetry() & resetAndShutdown() & rollbackAndCreationEvent() & batchOwnership() & batchFenceAndPartialQueue() & staleQueuedRootRejectsBatch() & singleRootAndHierarchyEffects() & phaseRetryCoverage() & queuedSurvivorIsReparented() & markerlessRollbackToken() & exhaustionBeforeCreation() & providerPinnedDuringRetry();
+    const bool ok = queueAndQuery() & fifoAndObserverRetry() & resetAndShutdown() & rollbackAndCreationEvent() & createdFifoContract() & batchOwnership() & batchFenceAndPartialQueue() & staleQueuedRootRejectsBatch() & singleRootAndHierarchyEffects() & phaseRetryCoverage() & queuedSurvivorIsReparented() & markerlessRollbackToken() & exhaustionBeforeCreation() & providerPinnedDuringRetry();
     EventBus::get().sink<EntityDestroyedEvent>().disconnect<&onDestroyed>();
     EventBus::get().clear();
     return ok && fixture_ok ? 0 : 1;

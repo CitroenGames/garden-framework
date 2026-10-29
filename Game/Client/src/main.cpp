@@ -386,6 +386,8 @@ int main(int argc, char* argv[])
             level_data, _world, render_api, create_authority_game_mode);
         if (level_construction.status != LevelInstantiationStatus::Completed)
         {
+            // A framework installation failure still owns a committed cohort;
+            // quit_game shuts the world down before the module is unloaded.
             LOG_ENGINE_FATAL("Failed to instantiate level (status {})", static_cast<int>(level_construction.status));
             quit_game(1);
         }

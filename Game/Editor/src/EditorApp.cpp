@@ -1653,6 +1653,10 @@ void EditorApp::beginPlay()
 {
     if (m_state.isSimulationActive())
         return; // already playing
+    if (m_editor_level_construction.status == LevelInstantiationStatus::FrameworkInstallFailure) {
+        LOG_ENGINE_ERROR("PIE: editor level framework installation failed; load a level before playing");
+        return;
+    }
     if (!finishLevelRollback(m_world, m_editor_level_construction) ||
         !finishLevelRollback(m_server_world, m_server_level_construction)) {
         LOG_ENGINE_ERROR("PIE: level rollback is still pending");
@@ -1804,6 +1808,7 @@ void EditorApp::beginPlay()
             m_server_level_construction = m_level_manager.instantiateLevelParallel(
                 m_play_snapshot, m_server_world, m_app.getRenderAPI());
             if (m_server_level_construction.status != LevelInstantiationStatus::Completed) {
+                // A committed framework failure remains owned by the server world.
                 LOG_ENGINE_ERROR("PIE: Server level construction failed (status {})",
                                  static_cast<int>(m_server_level_construction.status));
                 if (!finishLevelRollback(m_server_world, m_server_level_construction))
