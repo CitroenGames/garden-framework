@@ -267,6 +267,33 @@ bool createdFifoContract()
     bus.clear();
     return check(ok, "creation batch allocation failure, FIFO, observer failure, snapshot, clear and reentry");
 }
+
+bool typedFlushPreservesOtherQueues()
+{
+    auto& bus = EventBus::get();
+    bus.clear();
+    created_attempts.clear();
+    bus.sink<EntityCreatedEvent>().connect<&onCreatedFifo>();
+    bus.sink<LegacyFifoEvent>().connect<&onLegacyFifo>();
+
+    EntityCreatedEvent copied{EntityRef{}, "copied", {}};
+    bus.queue(copied);
+    bus.emplace<EntityCreatedEvent>(EntityRef{}, "emplaced", EntityHandle{});
+    bus.queue(LegacyFifoEvent{});
+    bus.flush<LegacyFifoEvent>();
+    bool ok = created_attempts == std::vector<std::string>{"legacy"};
+
+    bus.queue(LegacyFifoEvent{});
+    bus.flush<EntityCreatedEvent>();
+    ok &= created_attempts == std::vector<std::string>{"legacy", "copied", "emplaced"};
+    bus.flush<LegacyFifoEvent>();
+    ok &= created_attempts == std::vector<std::string>{"legacy", "copied", "emplaced", "legacy"};
+
+    bus.sink<EntityCreatedEvent>().disconnect<&onCreatedFifo>();
+    bus.sink<LegacyFifoEvent>().disconnect<&onLegacyFifo>();
+    bus.clear();
+    return check(ok, "typed flush preserves other event queues");
+}
 void onRestoreConstruct(entt::registry& registry, entt::entity entity)
 {
     failed_restore_raw = entity;
@@ -668,7 +695,7 @@ int main()
     ComponentId id{};
     if (catalog.registerComponent(descriptor, id) != ComponentCatalogResult::Success) return 1;
     EventBus::get().sink<EntityDestroyedEvent>().connect<&onDestroyed>();
-    const bool ok = queueAndQuery() & fifoAndObserverRetry() & resetAndShutdown() & rollbackAndCreationEvent() & createdFifoContract() & batchOwnership() & batchFenceAndPartialQueue() & staleQueuedRootRejectsBatch() & singleRootAndHierarchyEffects() & phaseRetryCoverage() & queuedSurvivorIsReparented() & markerlessRollbackToken() & exhaustionBeforeCreation() & providerPinnedDuringRetry() & stagedAllocationFailureRetry();
+    const bool ok = queueAndQuery() & fifoAndObserverRetry() & resetAndShutdown() & rollbackAndCreationEvent() & createdFifoContract() & typedFlushPreservesOtherQueues() & batchOwnership() & batchFenceAndPartialQueue() & staleQueuedRootRejectsBatch() & singleRootAndHierarchyEffects() & phaseRetryCoverage() & queuedSurvivorIsReparented() & markerlessRollbackToken() & exhaustionBeforeCreation() & providerPinnedDuringRetry() & stagedAllocationFailureRetry();
     EventBus::get().sink<EntityDestroyedEvent>().disconnect<&onDestroyed>();
     EventBus::get().clear();
     return ok && fixture_ok ? 0 : 1;

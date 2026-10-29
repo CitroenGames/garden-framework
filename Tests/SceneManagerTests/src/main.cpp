@@ -244,6 +244,17 @@ bool failLifecycleOnce(void* context, LifecyclePhase phase) noexcept {
     if (fault.armed && phase == fault.phase) { fault.armed = false; return true; }
     return false;
 }
+struct FailLifecycleAttempts {
+    int remaining = 2;
+};
+bool failLifecycleAttempts(void* context, LifecyclePhase phase) noexcept {
+    auto& fault = *static_cast<FailLifecycleAttempts*>(context);
+    if (phase == LifecyclePhase::Constraints && fault.remaining > 0) {
+        --fault.remaining;
+        return true;
+    }
+    return false;
+}
 int g_level_loaded_count = 0;
 int g_unload_attempts = 0;
 void recordLevelLoaded(const LevelLoadedEvent&) { ++g_level_loaded_count; }
@@ -412,6 +423,76 @@ void testLevelTransactionIdentityAndAbort() {
     EventBus::get().clear();
 }
 
+void testTransitionConstructionRollbackAndRetry() {
+    const std::string name = "transition retains exact unpublished rollback through retry";
+    TempLevel level("transition-construction-fault");
+    if (!level.write(R"({"metadata":{"level_name":"rollback"},"entities":[{"name":"broken","type":"Renderable","mesh":{"path":"missing_level_transaction_mesh.obj"},"components":{"RenderableComponent":{"layers":1,"owner":"0000000000000000-0000000000000000","casts_shadow":true}}}]})")) {
+        check(false, name, "could not write fixture"); return;
+    }
+    EventBus::get().clear();
+    EventBus::get().sink<EntityCreatedEvent>().connect<&recordEntityCreated>();
+    EventBus::get().sink<LevelLoadedEvent>().connect<&recordLevelLoaded>();
+    g_created_events.clear();
+    g_level_loaded_count = 0;
+    world game_world;
+    SceneManager manager;
+    completed(manager.initialize(&game_world, nullptr), name, "initialize failed");
+    const auto unrelated = game_world.registry.create();
+    FailLifecycleAttempts fault;
+    game_world.registry.ctx().emplace<garden::ecs::testing::LifecycleFaultHook>(
+        garden::ecs::testing::LifecycleFaultHook{&fault, &failLifecycleAttempts});
+
+    auto partial = manager.transition(level.path.string());
+    const auto token = partial.construction.rollback.operation;
+    check(fault.remaining == 0 && partial.status == SceneStatus::LifecycleFailure && !partial.cleanup_complete &&
+          partial.operation_handle.valid() && token.valid() && partial.lifecycle.operation == token &&
+          partial.lifecycle.kind == LifecycleOperationKind::UnpublishedRollback &&
+          partial.construction.status == LevelInstantiationStatus::ConstructionFailure &&
+          partial.construction.construction_status == ConstructionStatus::ComponentFailure &&
+          partial.construction.entities.size() == 1, name, "transition lost the construction rollback ownership");
+    EventBus::get().flush<EntityCreatedEvent>();
+    check(g_created_events.empty() && g_level_loaded_count == 0 && !manager.getActiveScene(),
+          name, "failed construction published an event or active scene");
+    auto busy = manager.transition(level.path.string());
+    check(busy.status == SceneStatus::Busy && busy.operation_handle == partial.operation_handle &&
+          busy.construction.rollback.operation == token && busy.lifecycle.operation == token &&
+          !busy.cleanup_complete, name, "competing transition replaced the owning operation");
+
+    auto done = manager.resume(partial.operation_handle);
+    check(done.status == SceneStatus::ConstructionFailure && done.cleanup_complete &&
+          done.construction.rollback.operation == token && done.lifecycle.operation == token &&
+          done.construction.entities == partial.construction.entities,
+          name, "resume did not preserve the original rollback and captured identities");
+    check(game_world.retirementResult(token).status == LifecycleStatus::UnknownOperation &&
+          game_world.registry.valid(unrelated), name, "rollback was not acknowledged or retired unrelated state");
+    for (auto handle : partial.construction.entities)
+        check(game_world.classifyEntityHandle(handle) == EntityHandleClassification::RetiredGone,
+              name, "unpublished incarnation survived rollback");
+    check(manager.resume(partial.operation_handle).status == SceneStatus::InvalidArgument,
+          name, "completed scene operation was resumed");
+    game_world.registry.ctx().erase<garden::ecs::testing::LifecycleFaultHook>();
+    auto* scene = manager.getScene(partial.scene_id);
+    check(scene && scene->state == SceneLoadState::Loaded && scene->level_data.entities.size() == 1,
+          name, "failed scene was not available for retry");
+    if (scene && scene->level_data.entities.size() == 1) {
+        scene->level_data.entities[0].mesh_path.clear();
+        scene->level_data.entities[0].type = EntityType::Static;
+        scene->level_data.entities[0].reflected_components.clear();
+        auto retry = manager.activateScene(partial.scene_id);
+        if (retry.status != SceneStatus::Completed || !retry.cleanup_complete || g_level_loaded_count != 1)
+            std::cerr << "Retry diagnostics: scene status=" << static_cast<int>(retry.status)
+                      << ", construction status=" << static_cast<int>(retry.construction.status)
+                      << ", transaction status=" << static_cast<int>(retry.construction.construction_status)
+                      << ", level loaded events=" << g_level_loaded_count << std::endl;
+        check(completed(retry, name, "retry activation failed") && g_level_loaded_count == 1,
+              name, "retry did not publish exactly once");
+    }
+    completed(manager.shutdown(), name, "shutdown failed");
+    EventBus::get().sink<EntityCreatedEvent>().disconnect<&recordEntityCreated>();
+    EventBus::get().sink<LevelLoadedEvent>().disconnect<&recordLevelLoaded>();
+    EventBus::get().clear();
+}
+
 void testThrowingUnloadObserver() {
     const std::string name = "throwing unload observer is attempted once";
     TempLevel level("observer");
@@ -555,6 +636,7 @@ int main()
     testFrameworkInstallFailureOwnsCommittedEntities();
     testDirectFrameworkInstallFailure();
     testLevelTransactionIdentityAndAbort();
+    testTransitionConstructionRollbackAndRetry();
     testThrowingUnloadObserver();
     testIncompleteShutdownDiagnostic();
 

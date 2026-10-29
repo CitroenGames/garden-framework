@@ -697,6 +697,86 @@ namespace
         return pass(name);
     }
 
+    bool testCommittedModuleComponentRetirement()
+    {
+        using namespace garden::ecs;
+        const std::string name = "GameModuleLifecycle_CommittedModuleComponentRetirement";
+        ScopedRecorder recorder("ecs_committed_retirement");
+        GameModuleLoader provider;
+        if (!provider.load(fixturePath("ecs_provider").string()) ||
+            !provider.registerEcsComponents() || !provider.isComponentProvider())
+            return fail(name, "provider load or registration failed");
+        const fs::path image = provider.getLoadedImagePath();
+        const garden::ecs::ComponentDescriptor descriptor{ComponentType<ModuleFixtureComponent>::key,
+            *provider.getComponentOwnerId(), sizeof(ModuleFixtureComponent), alignof(ModuleFixtureComponent),
+            ComponentDefaultConstruct, {}};
+        auto& catalog = ComponentCatalog::instance();
+        ComponentId id{};
+        if (catalog.resolve(descriptor, id) != ComponentCatalogResult::Success)
+            return fail(name, "module descriptor did not resolve");
+        {
+            world w;
+            bool armed = false;
+            struct CleanupGuard {
+                world& owner;
+                bool& armed;
+                ConstructionHandle transaction{};
+                LifecycleResult retirement{};
+                ~CleanupGuard() {
+                    armed = false;
+                    if (transaction.valid()) retirement = owner.abortConstruction(transaction).rollback;
+                    if (retirement.operation.valid()) (void)settleTestRollback(owner, retirement);
+                }
+            } guard{w, armed};
+            const auto begin = w.beginConstruction();
+            guard.transaction = begin.transaction;
+            if (begin.status != ConstructionStatus::Completed)
+                return fail(name, "construction did not begin");
+            const auto staged = w.createStagedEntity(begin.transaction);
+            if (staged.status != ConstructionStatus::Completed)
+                return fail(name, "staging failed");
+            const auto added = w.add<ModuleFixtureComponent>(begin.transaction, staged.entity);
+            if (added.transaction_status != ConstructionStatus::Completed ||
+                added.component_status != ComponentStoreResult::Success)
+                return fail(name, "module component staging failed");
+            const auto committed = w.commitConstruction(begin.transaction);
+            if (committed.status == ConstructionStatus::Completed) guard.transaction = {};
+            if (committed.status != ConstructionStatus::Completed || committed.entities.size() != 1 ||
+                committed.entities.front() != staged.captured || !w.isEntityValid(committed.entities.front()))
+                return fail(name, "construction did not publish the staged entity");
+            ModuleFixtureComponent* value = nullptr;
+            if (w.get<ModuleFixtureComponent>(committed.entities.front(), value) != ComponentStoreResult::Success ||
+                !value || value->value != 73)
+                return fail(name, "committed module value was not accessible");
+            if (provider.unload() || !provider.isLoaded() || !fs::exists(image) ||
+                catalog.resolve(descriptor, id) != ComponentCatalogResult::Success || !recorder.events().empty())
+                return fail(name, "committed value did not retain its provider and catalog entry");
+
+            armed = true;
+            w.registry.ctx().emplace<testing::LifecycleFaultHook>(testing::LifecycleFaultHook{&armed, &failStagedProviderCleanupOnce});
+            guard.retirement = w.retireEntities(committed.entities);
+            if (guard.retirement.status != LifecycleStatus::Partial ||
+                guard.retirement.phase != LifecyclePhase::Components || !guard.retirement.operation.valid() ||
+                provider.unload() || !provider.isLoaded() || !fs::exists(image) || !recorder.events().empty())
+                return fail(name, "partial retirement did not retain the committed value and provider");
+            const auto operation = guard.retirement.operation;
+            guard.retirement = w.resumeRetirement(operation);
+            if (!guard.retirement.cleanupComplete() || !provider.isLoaded() || !fs::exists(image) ||
+                !equals(recorder.events(), {"ecs.component.destroy"}))
+                return fail(name, "retirement did not destroy the module value once while mapped");
+            const auto acknowledged = w.acknowledgeRetirement(operation);
+            if (acknowledged.cleanupComplete()) guard.retirement = {};
+            if (!acknowledged.cleanupComplete() || !provider.isLoaded() || !fs::exists(image) ||
+                !equals(recorder.events(), {"ecs.component.destroy"}))
+                return fail(name, "retirement acknowledgement failed or repeated destruction");
+        }
+        if (!provider.unload() || provider.isLoaded() || fs::exists(image) ||
+            catalog.resolve(descriptor, id) != ComponentCatalogResult::NotFound ||
+            !equals(recorder.events(), {"ecs.component.destroy"}))
+            return fail(name, "provider did not retire after acknowledged cleanup");
+        return pass(name);
+    }
+
     bool testStoredModuleComponentRetirement()
     {
         using namespace garden::ecs;
@@ -1359,6 +1439,7 @@ int main()
     ok = testModuleComponentRegistration() && ok;
     ok = testCrossDllMixedQuery() && ok;
     ok = testStagedModuleComponentRollback() && ok;
+    ok = testCommittedModuleComponentRetirement() && ok;
     ok = testStoredModuleComponentRetirement() && ok;
     ok = testModuleComponentBatchFailures() && ok;
     ok = testProviderRetirement() && ok;
